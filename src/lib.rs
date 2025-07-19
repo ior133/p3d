@@ -16,10 +16,13 @@ use ndarray::Array3;
 use tri_mesh::mesh_builder::Error as MeshError;
 use crate::algo_grid::{get_contour, intersect, intersect_2};
 use crate::contour::Rect;
+use crate::gltf_loader::{GltfError, load_glb, convert_to_obj_data};
 
 mod polyline;
 mod contour;
 mod algo_grid;
+pub mod gltf_loader;
+
 use algo_grid::{
     find_top_std,
     find_top_std_2,
@@ -27,7 +30,6 @@ use algo_grid::{
     find_top_std_4,
 };
 type Vec2 = Point2<f64>;
-
 
 #[derive(Debug)]
 pub enum AlgoType {
@@ -43,30 +45,33 @@ pub enum P3DError {
     InvalidObject(ObjError),
     MeshError(MeshError),
     MathError,
+    GltfLoadError(GltfError),
 }
 
-
-pub fn p3d_process(input: &[u8], algo: AlgoType, par1: i16, par2: i16, trans: Option<[u8;4]>) -> Result<Vec<String>, P3DError> {
-    p3d_process_n(input, algo, 10, par1, par2, trans)
+impl From<GltfError> for P3DError {
+    fn from(err: GltfError) -> Self {
+        P3DError::GltfLoadError(err)
+    }
 }
 
-#[allow(unused_variables)]
-pub fn p3d_process_n(input: &[u8], algo: AlgoType, depth: usize, par1: i16, par2: i16, trans: Option<[u8;4]>) -> Result<Vec<String>, P3DError>
-{
-    let grid_size: i16 = par1;
-    let n_sections: i16 = par2;
-
-    let model: Obj<Vertex, u32> = load_obj(input).map_err(|e| P3DError::InvalidObject(e))?;
-
-    let vertices = model.vertices
+fn core_process_model(
+    model: Obj<Vertex, u32>,
+    algo: AlgoType,
+    depth: usize,
+    grid_size: i16,
+    n_sections: i16,
+    trans: Option<[u8; 4]>,
+) -> Result<Vec<String>, P3DError> {
+    let positions_f64: Vec<f64> = model.vertices
         .iter()
-        .flat_map(|v| v.position.iter())
-        .map(|v| <f64 as NumCast>::from(*v).unwrap())
+        .flat_map(|v| v.position.iter().map(|&coord| coord as f64))
         .collect();
 
+    let indices_u32: Vec<u32> = model.indices.clone();
+
     let mut mesh = MeshBuilder::new()
-        .with_indices(model.indices)
-        .with_positions(vertices)
+        .with_indices(indices_u32)
+        .with_positions(positions_f64)
         .build()
         .map_err(|e| P3DError::MeshError(e))?;
 
@@ -88,7 +93,6 @@ pub fn p3d_process_n(input: &[u8], algo: AlgoType, depth: usize, par1: i16, par2
     }
 
     let pit = algo_grid::principal_inertia_transform(triangles);
-
     let a: Matrix3<f64> = Matrix3::new(
         pit[[0, 0]], pit[[0, 1]], pit[[0, 2]],
         pit[[1, 0]], pit[[1, 1]], pit[[1, 2]],
@@ -124,7 +128,7 @@ pub fn p3d_process_n(input: &[u8], algo: AlgoType, depth: usize, par1: i16, par2
         );
     }
     let (v_min, v_max) = mesh.extreme_coordinates();
-
+    
     let mut centers: Vec<Vec<Vec2>> = Vec::with_capacity(depth);
     let step = (v_max.z - v_min.z) / (1.0f64 + n_sections as f64);
     for n in 0..n_sections {
@@ -140,13 +144,32 @@ pub fn p3d_process_n(input: &[u8], algo: AlgoType, depth: usize, par1: i16, par2
         }
     }
     let rect = Rect::new(v_min.x, v_max.x, v_min.y, v_max.y);
-
+    
     let res = match algo {
         AlgoType::Grid2dV2 => find_top_std_2(&centers, depth as usize, n_sections as usize, grid_size as usize, rect),
         AlgoType::Grid2dV3 => find_top_std_3(&centers, depth as usize, n_sections as usize, grid_size as usize, rect),
         AlgoType::Grid2dV3a => find_top_std_4(&centers, depth as usize, n_sections as usize, grid_size as usize, rect),
         _ => find_top_std(&centers, depth as usize, grid_size, rect),
     };
-
     Ok(res)
+}
+
+pub fn p3d_process(input: &[u8], algo: AlgoType, par1: i16, par2: i16, trans: Option<[u8;4]>) -> Result<Vec<String>, P3DError> {
+    p3d_process_n(input, algo, 10, par1, par2, trans)
+}
+
+#[allow(unused_variables)]
+pub fn p3d_process_n(input: &[u8], algo: AlgoType, depth: usize, par1: i16, par2: i16, trans: Option<[u8;4]>) -> Result<Vec<String>, P3DError>
+{
+    let model: Obj<Vertex, u32> = load_obj(input).map_err(P3DError::InvalidObject)?;
+    core_process_model(model, algo, depth, par1, par2, trans)
+}
+
+// New function for .glb input
+#[allow(unused_variables)]
+pub fn p3d_process_glb(input: &[u8], algo: AlgoType, depth: usize, par1: i16, par2: i16, trans: Option<[u8;4]>) -> Result<Vec<String>, P3DError>
+{
+    let gltf_meshes = load_glb(input)?;
+    let model: Obj<Vertex, u32> = convert_to_obj_data(&gltf_meshes);
+    core_process_model(model, algo, depth, par1, par2, trans)
 }
